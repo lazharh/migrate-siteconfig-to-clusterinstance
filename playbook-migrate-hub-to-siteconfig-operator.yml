@@ -1,0 +1,374 @@
+---
+- name: Enable SiteConfig Operator and additional related Configs
+  hosts: localhost
+  gather_facts: false
+  become: false
+  connection: local
+  collections:
+    - kubernetes.core
+    - community.general
+
+  vars_files:
+    - migrate-hub-to-siteconfig-operator-vars.yml
+#  vars:
+#    ocp_api_url: "toBeSet:6443"
+#    ocp_username: "kubeadmin"
+#    ocp_password: "tobechanged"
+#    argocd_appProject_list:
+#      - ztp-app-project
+#    argocd_apps_list:
+#      - clusters
+#      - clusters2
+
+  tasks:
+
+    - name: Authenticate to OpenShift using username/password
+      kubernetes.core.k8s_auth:
+        host: "{{ ocp_api_url }}"
+        password: "{{ ocp_password }}"
+        username: "{{ ocp_username }}"
+        state: present
+        validate_certs: no
+      register: k8s_auth_result
+      when: ocp_username != "" and ocp_password != "" and ocp_api_url != ""
+
+    - name: Gather data about ACM Operator
+      kubernetes.core.k8s_info:
+        kind: Subscription
+        api_version: "operators.coreos.com/v1alpha1"
+        namespace: open-cluster-management
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      register: subs_list
+
+#    - name: Debug Subscriptions list
+#      loop_control: # debuces debug output in the task
+#        label: "{{ item.metadata.name }}"
+#      with_items:
+#        - "{{ subs_list.resources }}"
+#      ansible.builtin.debug:
+#        msg: "{{ item.metadata.name }}"
+
+    - name: Check ACM operator Minimal version is 2.12
+      ansible.builtin.fail:
+        msg: "Minimal Required ACM version is 2.12"
+      when:  
+        - not ( item.spec.channel | regex_search('2.1[2-9]') )
+        - item.spec.name == "advanced-cluster-management"
+      failed_when: true
+      with_items:
+        - "{{ subs_list.resources }}"
+      loop_control: # debuces debug output in the task
+        label: "{{ item.metadata.name }}"
+
+    - name: Retrieve the MultiClusterHub data from Cluster
+      kubernetes.core.k8s_info:
+        kind: MultiClusterHub
+        name: multiclusterhub # expecting the name to be standard as per the doc
+        api_version: "operator.open-cluster-management.io/v1"
+        namespace: open-cluster-management
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      register: mch_list
+
+    - name: Check ACM MultiClusterHub Object is stable and reconciled to continue
+      ansible.builtin.fail:
+        msg: "MultiClusterHub Object is not in a stable state"
+      when:  
+        - not ( item.status.phase == "Running" )
+        #- item.status.phase == "Running" # for negative test
+        - item.metadata.name == "multiclusterhub"
+      failed_when: true
+      with_items:
+        - "{{ mch_list.resources }}"
+      loop_control: # debuces debug output in the task
+        label: "{{ item.metadata.name }}"
+
+    - name: Fail if ArgoCD Application has a finlizer (cascaded delete)
+      kubernetes.core.k8s_info:
+        kind: Application
+        name: "{{ item }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      with_items:
+        - "{{ argocd_apps_list }}"
+      register: app_list
+      loop_control:
+        label: "{{ item }}"
+      failed_when: app_list.resources | selectattr('metadata.finalizers', 'defined') | selectattr('metadata.finalizers', '!=', None) | list | length > 0
+
+#    - name: Debug Apps list
+#      ansible.builtin.debug:
+#        var: app_list.results
+#
+    - name: Set Fact - resource size
+      ansible.builtin.set_fact:
+        res_length: "{{ app_list.results[0] | selectattr('resources', 'defined')  | selectattr('resources', '!=', None) | list | length }}"
+
+    - name: Debug Apps list
+      ansible.builtin.debug:
+        var: res_length
+
+    - name: Gather info on AppProject of ArgoCD
+      kubernetes.core.k8s_info:
+        kind: AppProject
+        name: "{{ item }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      with_items:
+        - "{{ argocd_appProject_list }}"
+      register: appproj_list
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Create Back up folder
+      ansible.builtin.file:
+        path: "backup-{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+        state: directory
+        mode: '0755'
+      register: backup_folder
+      when: > 
+        app_list.results | map(attribute='resources', default=[]) | map('length') | max > 0 or
+        appproj_list.results | map(attribute='resources', default=[]) | map('length') | max > 0
+      #when: app_list.results | map(attribute='resources', default=[]) | map('length') | min > 0 and app_list.results | selectattr('resources', 'defined') | list | length == app_list.results | length
+      #when: app_list.results | map(attribute='resources') | map('length') | min > 0
+      
+    - name: Bakcup ArgoCD Applications Yaml
+      ansible.builtin.copy:
+        dest: "{{ backup_folder.path }}/{{ item.resources[0].metadata.name }}.yaml"
+        content: "{{ item.resources[0] | to_nice_json(indent=2) }}"
+        mode: '0644'
+
+      #when: app_list.results | map(attribute='resources', default=[]) | map('length') | max > 0
+      when: item.resources is defined and item.resources | length > 0
+      with_items:
+        - "{{ app_list.results }}"
+
+    - name: Bakcup AppProject Yaml
+      ansible.builtin.copy:
+        dest: "{{ backup_folder.path }}/{{ item.resources[0].metadata.name }}.yaml"
+        content: "{{ item.resources[0] | to_nice_json(indent=2) }}"
+        mode: '0644'
+      when: appproj_list.results | map(attribute='resources') | map('length') | max > 0
+      with_items:
+        - "{{ appproj_list.results }}"
+
+    - name: Delete AppProject of ArgoCD
+      kubernetes.core.k8s:
+        kind: AppProject
+        name: "{{ item }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        state: absent
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      with_items:
+        - "{{ argocd_appProject_list }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: Delete Apps of ArgoCD
+      kubernetes.core.k8s:
+        kind: Application
+        name: "{{ item }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        state: absent
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      with_items:
+        - "{{ argocd_apps_list }}"
+      loop_control:
+        label: "{{ item }}"
+
+#    - name: Check SiteConfig addon availability in ACM
+#      ansible.builtin.debug:
+#        msg: "MultiClusterHub SiteConfig Addon config {{ item.spec.overrides.components | selectattr('name', '==', 'siteconfig') | selectattr('enabled', '==', False) | map(attribute='configOverrides') | first }}"
+#      when: item.spec.overrides.components | selectattr('name', '==', 'siteconfig') | selectattr('enabled', '==', False) | length > 0
+#      with_items:
+#        - "{{ mch_list.resources }}"
+#      loop_control: # rebuces debug output in the task
+#        label: "{{ item.metadata.name }}"
+
+    - name: Patch MultiClusterHub ] [ Enable SiteConfig addon on ACM
+      kubernetes.core.k8s:
+        kind: MultiClusterHub
+        name: multiclusterhub # expecting the name to be standard as per the doc
+        api_version: "operator.open-cluster-management.io/v1"
+        namespace: open-cluster-management
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+        state: patched
+        definition:
+          spec:
+            overrides:
+              components:
+                - name: siteconfig
+                  enabled: true
+                  configOverrides: "{{ item.spec.overrides.components | selectattr('name', '==', 'siteconfig') | selectattr('enabled', '==', False) | map(attribute='configOverrides') | first }}"
+      when:
+        - item.spec.overrides.components | selectattr('name', '==', 'siteconfig') | selectattr('enabled', '==', False) | length > 0
+        - item.metadata.name == "multiclusterhub" 
+      with_items:
+        - "{{ mch_list.resources }}"
+      loop_control: # debuces debug output in the task
+        label: "{{ item.metadata.name }}"
+
+    - name: Wait till siteconfig-controller Pod is up in open-cluster-management namespace
+      kubernetes.core.k8s_info:
+        kind: Pod
+        api_version: v1
+        namespace: open-cluster-management
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+      register: pod_list
+      until: pod_list.resources | selectattr('metadata.name', 'search', '^siteconfig') | list | length > 0
+      retries: 30
+      delay: 10
+
+    - name: Create siteconfig-v2 approject to replace ztp-app-project
+      kubernetes.core.k8s:
+        kind: AppProject
+        name: siteconfig-v2
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition:
+          spec:
+            clusterResourceWhitelist:
+              - group: ""
+                kind: Namespace
+              - group: cluster.open-cluster-management.io
+                kind: ManagedCluster
+              - group: rbac.authorization.k8s.io
+                kind: ClusterRoleBinding
+            namespaceResourceWhitelist:
+              - group: ""
+                kind: ConfigMap
+              - group: ""
+                kind: Secret
+              - group: siteconfig.open-cluster-management.io
+                kind: ClusterInstance
+              - group: ""
+                kind: Namespace
+              - group: agent-install.openshift.io
+                kind: InfraEnv
+              - group: agent-install.openshift.io
+                kind: NMStateConfig
+              - group: extensions.hive.openshift.io
+                kind: AgentClusterInstall
+              - group: hive.openshift.io
+                kind: ClusterDeployment
+              - group: metal3.io
+                kind: BareMetalHost
+              - group: metal3.io
+                kind: HostFirmwareSettings
+              - group: agent.open-cluster-management.io
+                kind: KlusterletAddonConfig
+              - group: cluster.open-cluster-management.io
+                kind: ManagedCluster
+             # - group: ran.openshift.io
+             #   kind: SiteConfig
+              - group: batch
+                kind: Job
+              - group: ""
+                kind: ServiceAccount
+            sourceRepos:
+              - '*'
+            destinations:
+              - namespace: '*'
+                server: '*'
+
+    - name: Create ArgoCD App {{ argocd_apps_list[0] }}
+      kubernetes.core.k8s:
+        kind: Application
+        name: "{{ argocd_apps_list[0] }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition:
+          spec:
+            destination:
+              namespace: clusters-sub
+              server: https://kubernetes.default.svc
+            project: siteconfig-v2
+            source:
+              path: "{{ git_repo['path'] }}"
+              repoURL: "{{ git_repo['repo'] }}"
+              targetRevision: "{{ git_repo['branch'] }}"
+            syncPolicy:
+              automated:
+                prune: false # replace to true on the CR on the OCP hub once you are sure everything is ok
+                selfHeal: true
+              syncOptions:
+              - CreateNamespace=true
+          
+    - name: Create ArgoCD App {{ argocd_apps_list[1] }}
+      kubernetes.core.k8s:
+        kind: Application
+        name: "{{ argocd_apps_list[1] }}"
+        api_version: argoproj.io/v1alpha1
+        namespace: openshift-gitops
+        host: "{{ k8s_auth_result.k8s_auth.host }}"
+        username: "{{ k8s_auth_result.k8s_auth.username }}"
+        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        validate_certs: false
+        state: present
+        definition:
+          spec:
+            destination:
+              namespace: clusters-sub
+              server: https://kubernetes.default.svc
+            project: siteconfig-v2
+            source:
+              path: "{{ git2_repo['path'] }}"
+              repoURL: "{{ git2_repo['repo'] }}"
+              targetRevision: "{{ git2_repo['branch'] }}"
+            syncPolicy:
+              automated:
+                prune: false # replace to true on the CR on the OCP hub once you are sure everything is ok
+                selfHeal: true
+              syncOptions:
+              - CreateNamespace=true
+
+
+    - name: Run shell command for each cluster and its subitems
+      #ansible.builtin.command: |
+      ansible.builtin.shell: |
+        for cr in bmh,hfs,clusterdeployment,agentclusterinstall,infraenv,nmstateconfig,configmap,klusterletaddonconfig,secrets; do echo $cr; /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label $cr app.kubernetes.io/instance- --all -n ${CLUSTER_NAME}; done && /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label ns ${CLUSTER_NAME} app.kubernetes.io/instance- && /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label managedclusters ${CLUSTER_NAME} app.kubernetes.io/instance-
+
+      environment:
+        CLUSTER_NAME: "{{ item }}"
+        OCP_TOKEN: "{{ k8s_auth_result.k8s_auth.api_key }}"
+        OCP_SERVER: "{{ k8s_auth_result.k8s_auth.host }}"
+        #BMH: "{{ (vars[item].bmh | default('')) if (vars[item] is defined) else '' }}"
+      loop: "{{ cluster_names }}"
+      when: cluster_names | length > 0
