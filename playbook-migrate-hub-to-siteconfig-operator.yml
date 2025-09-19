@@ -10,15 +10,6 @@
 
   vars_files:
     - migrate-hub-to-siteconfig-operator-vars.yml
-#  vars:
-#    ocp_api_url: "toBeSet:6443"
-#    ocp_username: "kubeadmin"
-#    ocp_password: "tobechanged"
-#    argocd_appProject_list:
-#      - ztp-app-project
-#    argocd_apps_list:
-#      - clusters
-#      - clusters2
 
   tasks:
 
@@ -91,7 +82,7 @@
     - name: Fail if ArgoCD Application has a finlizer (cascaded delete)
       kubernetes.core.k8s_info:
         kind: Application
-        name: "{{ item }}"
+        name: "{{ item['app_name] }}"
         api_version: argoproj.io/v1alpha1
         namespace: openshift-gitops
         host: "{{ k8s_auth_result.k8s_auth.host }}"
@@ -102,20 +93,13 @@
         - "{{ argocd_apps_list }}"
       register: app_list
       loop_control:
-        label: "{{ item }}"
+        label: "{{ item['app_name] }}"
       failed_when: app_list.resources | selectattr('metadata.finalizers', 'defined') | selectattr('metadata.finalizers', '!=', None) | list | length > 0
 
 #    - name: Debug Apps list
 #      ansible.builtin.debug:
 #        var: app_list.results
 #
-    - name: Set Fact - resource size
-      ansible.builtin.set_fact:
-        res_length: "{{ app_list.results[0] | selectattr('resources', 'defined')  | selectattr('resources', '!=', None) | list | length }}"
-
-    - name: Debug Apps list
-      ansible.builtin.debug:
-        var: res_length
 
     - name: Gather info on AppProject of ArgoCD
       kubernetes.core.k8s_info:
@@ -150,7 +134,6 @@
         dest: "{{ backup_folder.path }}/{{ item.resources[0].metadata.name }}.yaml"
         content: "{{ item.resources[0] | to_nice_json(indent=2) }}"
         mode: '0644'
-
       #when: app_list.results | map(attribute='resources', default=[]) | map('length') | max > 0
       when: item.resources is defined and item.resources | length > 0
       with_items:
@@ -184,7 +167,7 @@
     - name: Delete Apps of ArgoCD
       kubernetes.core.k8s:
         kind: Application
-        name: "{{ item }}"
+        name: "{{ item['app_name'] }}"
         api_version: argoproj.io/v1alpha1
         namespace: openshift-gitops
         state: absent
@@ -195,7 +178,7 @@
       with_items:
         - "{{ argocd_apps_list }}"
       loop_control:
-        label: "{{ item }}"
+        label: "{{ item['app_name'] }}"
 
 #    - name: Check SiteConfig addon availability in ACM
 #      ansible.builtin.debug:
@@ -303,10 +286,12 @@
               - namespace: '*'
                 server: '*'
 
-    - name: Create ArgoCD App {{ argocd_apps_list[0] }}
+    - name: Create ArgoCD App {{ item.app_name }}
+      with_items:
+        - "{{ argocd_apps_list }}"
       kubernetes.core.k8s:
         kind: Application
-        name: "{{ argocd_apps_list[0] }}"
+        name: "{{ item['app_name'] }}"
         api_version: argoproj.io/v1alpha1
         namespace: openshift-gitops
         host: "{{ k8s_auth_result.k8s_auth.host }}"
@@ -321,9 +306,9 @@
               server: https://kubernetes.default.svc
             project: siteconfig-v2
             source:
-              path: "{{ git_repo['path'] }}"
-              repoURL: "{{ git_repo['repo'] }}"
-              targetRevision: "{{ git_repo['branch'] }}"
+              path: "{{ item['path'] }}"
+              repoURL: "{{ item['repo'] }}"
+              targetRevision: "{{ item['branch'] }}"
             syncPolicy:
               automated:
                 prune: false # replace to true on the CR on the OCP hub once you are sure everything is ok
@@ -331,39 +316,17 @@
               syncOptions:
               - CreateNamespace=true
           
-    - name: Create ArgoCD App {{ argocd_apps_list[1] }}
-      kubernetes.core.k8s:
-        kind: Application
-        name: "{{ argocd_apps_list[1] }}"
-        api_version: argoproj.io/v1alpha1
-        namespace: openshift-gitops
-        host: "{{ k8s_auth_result.k8s_auth.host }}"
-        username: "{{ k8s_auth_result.k8s_auth.username }}"
-        api_key: "{{ k8s_auth_result.k8s_auth.api_key }}"
-        validate_certs: false
-        state: present
-        definition:
-          spec:
-            destination:
-              namespace: clusters-sub
-              server: https://kubernetes.default.svc
-            project: siteconfig-v2
-            source:
-              path: "{{ git2_repo['path'] }}"
-              repoURL: "{{ git2_repo['repo'] }}"
-              targetRevision: "{{ git2_repo['branch'] }}"
-            syncPolicy:
-              automated:
-                prune: false # replace to true on the CR on the OCP hub once you are sure everything is ok
-                selfHeal: true
-              syncOptions:
-              - CreateNamespace=true
-
-
+### The following task must run after pushing the new kustomization with clusterInstance CRDs to git and sync gitops.
+# a pause task is added. you can either use prompt or minutes but not both in the same time
+#
+    - name: Pause for 2 hours so that you have time to push the kustomization.yaml with clusterInstance to git repo ] [ it can be cancelled.
+      ansible.builtin.pause:
+        #prompt: Press Enter when done
+        minutes: 120
+## wondering if there is a need to re-run the task to authenticate to the cluster (task 1)
     - name: Run shell command for each cluster and its subitems
-      #ansible.builtin.command: |
       ansible.builtin.shell: |
-        for cr in bmh,hfs,clusterdeployment,agentclusterinstall,infraenv,nmstateconfig,configmap,klusterletaddonconfig,secrets; do echo $cr; /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label $cr app.kubernetes.io/instance- --all -n ${CLUSTER_NAME}; done && /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label ns ${CLUSTER_NAME} app.kubernetes.io/instance- && /home/lhalleb/ocp_install/bin/oc --token="$OCP_TOKEN" --server="$OCP_SERVER" label managedclusters ${CLUSTER_NAME} app.kubernetes.io/instance-
+        for cr in bmh,hfs,clusterdeployment,agentclusterinstall,infraenv,nmstateconfig,configmap,klusterletaddonconfig,secrets; do echo $cr; /home/lhalleb/ocp_install/bin/oc --insecure-skip-tls-verify=true --token="$OCP_TOKEN" --server="$OCP_SERVER" label $cr app.kubernetes.io/instance- --all -n ${CLUSTER_NAME}; done && /home/lhalleb/ocp_install/bin/oc --insecure-skip-tls-verify=true --token="$OCP_TOKEN" --server="$OCP_SERVER" label ns ${CLUSTER_NAME} app.kubernetes.io/instance- && /home/lhalleb/ocp_install/bin/oc --insecure-skip-tls-verify=true --token="$OCP_TOKEN" --server="$OCP_SERVER" label managedclusters ${CLUSTER_NAME} app.kubernetes.io/instance-
 
       environment:
         CLUSTER_NAME: "{{ item }}"

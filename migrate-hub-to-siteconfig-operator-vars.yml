@@ -1,21 +1,19 @@
-ocp_api_url: "https://api.ocp.example.com:6443"
-## cluster Admin user is required
+ocp_api_url: "https://api.example.com:6443"
+### a cluster admin user is required.
 ocp_username: "kubeadmin"
-ocp_password: "use-password-goes-here"
+ocp_password: "XXXXX-YYYYY-ZZZZZ-TTTTT"
 argocd_appProject_list:
   - ztp-app-project
 argocd_apps_list:
-  - clusters
-  - clusters2
-git_repo:
-  repo: git@git.example.com:username/acm.git
-  path: siteconfig
-  branch: main
-git2_repo:
-  repo: git@git.example.com:username/acm.git
-  path: siteconfig2
-  branch: main
+  - app_name: clusters
+    repo: git@git.example.com:username/repo.git
+    path: siteconfig
+    branch: main
+  - app_name: clusters2
+    repo: git@git.example.com:username/repo.git
+    path: siteconfig2
+    branch: main
 cluster_names:
-  - 3node-ocp
+  - 3nodes-ocp
   - sno1
   - sno2
