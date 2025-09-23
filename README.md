@@ -6,13 +6,14 @@ DISCLAIMER: This is personal work and not supported by Red Hat.
 
 1 - Convert your clusters files from SiteConfig yamls to ClusterInstance using this tool: https://github.com/openshift-kni/cnf-features-deploy/tree/master/ztp/tools/siteconfig-converter#siteconfig-to-clusterinstance-converter
 
-2- extraManifests section in siteConfig and crTemplates are ignored in the conversion and you will receive a warning about that. In my opinion you do not need those because the clusters are already created and Manifests are applied. but for both extraManifest and crTemplates: you can create a different ai-cluster-template-v2 from -v1 (this to be done beforehand). extraManifes
-t requires also creating the configMap with all the manifest files referred to in that configMap (see article in 0-)
+2- extraManifests section in siteConfig and crTemplates are ignored in the conversion and you will receive a warning about that. In my opinion you do not need those because the clusters are already created and Manifests are applied. but for both extraManifest and crTemplates: you can create a different ai-cluster-template-v2 from -v1 (this to be done beforehand). 
+extraManifest requires also creating the configMap with all the manifest files referred to in that configMap (see article in 0-)
 
 3 - Prepare the kustomization yaml file (name is kustomization.yaml-for-clusterInstance): the SiteConfig yaml file used to go to generators Section, but now clusterInstance yamls go to resources section. Also a yaml file to define the namespace of the cluster name is required (kind: namespace etc.) for each cluster, and must be added to resources. If you are creating ConfigMaps and modifying template
 Please read the articles and see how that is done.
 
-4- Run the Playbook: This will migrate an Red Hat ACM (Advanced Cluster Management for Kubernetes) hub cluster version 2.12 and above for uste SiteConfig CR (SiteConfig files) to ClusterInstance CR/files. The ACM cluster must have spoke (managed) clusters installed originally based on siteConfig CR.
+4- Review the playbook first and prepare it to adapt to you situation. Especially the vars file. 
+Run the Playbook: This will migrate an Red Hat ACM (Advanced Cluster Management for Kubernetes) hub cluster version 2.12 and above for uste SiteConfig CR (SiteConfig files) to ClusterInstance CR/files. The ACM cluster must have spoke (managed) clusters installed originally based on siteConfig CR.
 It is based on this Article: https://access.redhat.com/articles/7124143
 
 Please update variables according to your situation.
