@@ -321,7 +321,7 @@
 #
     - name: Pause for 2 hours so that you have time to push the kustomization.yaml with clusterInstance to git repo ] [ it can be cancelled.
       ansible.builtin.pause:
-        #prompt: Press Enter when done
+        #prompt: Press Enter when done, to continue executing the play
         minutes: 120
 ## wondering if there is a need to re-run the task to authenticate to the cluster (task 1)
     - name: Run shell command for each cluster and its subitems
